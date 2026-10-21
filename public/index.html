@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f6f3ec">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>纯阅 · 把世界留在书外</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/ebooks.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <section id="login-screen" class="home" hidden><div class="intro"><p class="eyebrow">PURE NOVEL · PRIVATE</p><h1>你的故事，<br>随身而行。</h1><p>仅限受邀成员使用。请使用管理员为你创建的用户名与密码登录，无需邮箱。</p></div><form id="login-form" class="import-card"><label for="username">用户名</label><input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required minlength="3" maxlength="32" pattern="[A-Za-z\u3400-\u4dbf\u4e00-\u9fff][A-Za-z0-9_\u3400-\u4dbf\u4e00-\u9fff]{2,31}" aria-describedby="username-hint"><p id="username-hint" class="hint">3～32 位中文、英文字母、数字或下划线，以中文或字母开头，英文不区分大小写。</p><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256"><button id="login-submit">登录</button><p id="login-error" class="error" role="alert"></p></form></section>
+  <div id="home" class="home" hidden>
+    <div id="account-bar" hidden><span id="account-name"></span> · <span id="account-status"></span><button id="sync-now" class="text-button">同步 / 刷新</button><button id="import-local" class="text-button" hidden>导入旧版书架</button><button id="logout" class="text-button">退出并清除本机数据</button></div>
+    <header class="home-header"><a class="brand" href="/">纯阅<span>PURE NOVEL</span></a><span class="quiet">少一点打扰，多一点想象。</span></header>
+    <main>
+      <section class="intro"><p class="eyebrow">YOUR OWN READING CORNER</p><h1>把世界，<br>留在书外。</h1><p class="subtitle">记住一个书名，寻找一个故事。让阅读回归文字本身。</p></section>
+      <section id="web-entry" class="import-card" aria-labelledby="import-title"><div class="section-label"><h2 id="import-title">想读什么故事？</h2><span>自动识别 · 整理阅读</span></div>
+        <form id="import-form"><label class="sr-only" for="url">小说书名或网址</label><input id="url" name="url" type="text" placeholder="输入小说名，或粘贴目录 / 章节网址" required maxlength="2048" autocomplete="off"><button type="submit" id="import-button">开始阅读 ↗</button></form>
+        <p id="entry-status" class="hint" role="status"></p><p id="import-error" class="error" role="alert"></p>
+        <p class="hint">网文：输入书名自动寻找可读来源，或粘贴目录／章节网址。仅处理有权阅读的内容，不绕过登录、付费或验证。</p>
+      </section>
+      <section id="discovery" class="import-card search-card" aria-labelledby="search-title" hidden><div class="section-label"><h2 id="search-title">作品与来源</h2><span>检查详情</span></div>
+        <form id="search-form"><label class="sr-only" for="book-query">小说书名</label><input id="book-query" type="search" placeholder="输入完整小说书名" required minlength="2" maxlength="60"><button id="search-button" type="submit">搜索来源 ↗</button></form>
+        <p class="hint">尝试 Bing / 360 / 百度 / 搜狗，入口可用性以实际结果为准。来源不足时补搜，自动检查最多 8 个不同网站；仅验证正文样本，不保证全书完整或内容授权。</p>
+        <p id="search-status" class="hint" role="status"></p><p id="search-error" class="error" role="alert"></p><div id="search-results" class="search-results"></div><button id="search-more" type="button" hidden>继续寻找来源</button>
+      </section>
+      <section id="ebook-import" class="import-card ebook-import" aria-labelledby="ebook-import-title"><h2 id="ebook-import-title">导入电子书</h2><label for="ebook-file">选择已下载的 EPUB / TXT 文件（最多 24 MiB）</label><input id="ebook-file" type="file" accept=".epub,.txt,application/epub+zip,text/plain"><p class="hint">可从手机“文件／下载项”选择你从 Z-Library 或其他来源合法取得的无 DRM 文件。仅在当前浏览器处理和保存，不上传正文、不连接来源账号。暂不支持 PDF、MOBI、AZW3。</p><p class="hint">需要 HTTPS 或 localhost；清理浏览器数据会删除本机文件，跨设备需重新导入同一文件。</p><p id="ebook-status" class="hint" role="status" aria-live="polite"></p></section>
+      <section class="shelf-section"><div class="section-label"><h2>我的书架 <small id="book-count">0</small></h2><span>故事停在哪里，我们都记得</span></div><div id="shelf" class="shelf"></div></section>
+      <footer class="home-footer"><span>纯净排版 / 进度记忆 / 离线续读</span><button id="help-button" class="text-button">如何添加到手机桌面？</button><p>云端模式按账号同步书架与进度，正文缓存在本机。仅处理有权阅读的内容，不上传源站 Cookie。</p></footer>
+    </main>
+  </div>
+  <section id="reader" class="reader" hidden>
+    <header id="reader-header" class="reader-header"><button id="back" class="icon-button" aria-label="回到书架">‹</button><div><span class="eyebrow">正在阅读</span><p id="reader-book"></p></div><button id="catalog-button" class="text-button">目录</button></header>
+    <main id="reading-area" class="reading-area"><p id="chapter-caption" class="eyebrow">CHAPTER</p><h1 id="chapter-title"></h1><div id="reading-warning" class="warning" role="status" hidden></div><article id="content" tabindex="0" aria-label="小说正文"></article><div class="chapter-end"><span>— 暂停片刻，故事仍在继续 —</span><button id="next-bottom">阅读下一章 →</button></div></main>
+    <footer id="reader-footer" class="reader-footer"><div class="reading-progress"><span id="progress-label">0%</span><span id="cache-label"></span><button id="refresh-chapter" class="text-button">重新获取本章</button></div><nav><button id="previous">← 上一章</button><button id="focus-button">沉浸</button><button id="settings-button">Aa 设置</button><button id="next">下一章 →</button></nav></footer>
+    <button id="exit-focus" class="exit-focus" hidden>退出沉浸</button>
+  </section>
+  <dialog id="catalog-dialog"><div class="dialog-head"><div><span class="eyebrow">CONTENTS</span><h2>章节目录</h2></div><button class="close-dialog icon-button" aria-label="关闭目录">×</button></div><p id="catalog-status" class="hint"></p><div id="chapters" class="chapters"></div><button id="catalog-more" hidden>加载下一页目录</button></dialog>
+  <dialog id="settings-dialog"><div class="dialog-head"><h2>阅读偏好</h2><button class="close-dialog icon-button" aria-label="关闭设置">×</button></div><label class="setting-row">字号 <input id="font-size" type="range" min="16" max="30" step="1"><output id="font-output"></output></label><label class="setting-row">行距 <select id="line-height"><option value="1.7">紧凑</option><option value="1.95">舒适</option><option value="2.2">宽松</option></select></label><label class="setting-row">字体 <select id="font-family"><option value="serif">宋体 / 衬线</option><option value="sans-serif">系统黑体</option></select></label><div class="setting-row">背景 <div class="themes"><button data-theme="paper">纸白</button><button data-theme="green">青绿</button><button data-theme="night">夜读</button></div></div><p class="hint">点击正文可切换沉浸模式；进度自动保存在本机。</p><button id="clear-cache" class="text-button">清除本机章节缓存</button></dialog>
+  <dialog id="help-dialog"><div class="dialog-head"><h2>把纯阅放在桌面</h2><button class="close-dialog icon-button" aria-label="关闭帮助">×</button></div><p>iPhone：使用 Safari 打开，点“分享”→“添加到主屏幕”。</p><p>Android：使用支持安装的浏览器，在菜单中选择“安装应用”或“添加到主屏幕”。</p><p class="hint">桌面安装和离线外壳需要 HTTPS（本机 localhost 除外）。普通局域网 HTTP 仍可在线阅读，但不保证可安装。</p><p class="hint">最近成功读取的 20 个完整章节会保存在本机，可在书架中离线续读。缓存可能被系统清理，不等于永久下载。</p></dialog>
+  <div id="busy" class="busy" role="status" hidden><span class="spinner"></span><span>正在整理文字…</span></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="ebook-confirm" aria-labelledby="ebook-confirm-title"><h2 id="ebook-confirm-title">核对电子书</h2><form id="ebook-confirm-form"><p id="ebook-info" class="hint"></p><label for="ebook-title">书名</label><input id="ebook-title" required maxlength="200"><label for="ebook-author">作者（可留空）</label><input id="ebook-author" maxlength="200"><p id="ebook-warning" class="hint"></p><p id="ebook-match" class="hint"></p><h3>正文预览</h3><pre id="ebook-preview"></pre><p class="hint">请确认你有权使用此文件。确认后仅保存至当前账号的本机浏览器。</p><p id="ebook-confirm-error" class="error" role="alert"></p><div class="ebook-actions"><button id="ebook-accept" type="submit">导入并阅读</button><button id="ebook-cancel" type="button" class="text-button">取消</button></div></form></dialog>
+  <dialog id="conflict-dialog"><h2>其他设备更新了数据</h2><p>请选择保留哪一份书架和进度。使用本机版本将尝试覆盖最新云端版本；使用云端版本会舍弃本机未同步变更。</p><button id="keep-local">保留本机版本</button><button id="keep-cloud">使用云端版本</button></dialog>
+</body>
+</html>

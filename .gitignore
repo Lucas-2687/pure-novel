@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.venv/
+*.log
+.env
+.env.*
+!.env.example
+.vercel/
+# Private development notes and live diagnostic reports
+HANDOFF.md
+ASSISTANT.md
+EXPERIENCE-ROADMAP.md
+search-validation.json
+source-survey.json
+*regression*.json
+*.local
+*.pem
+*.key

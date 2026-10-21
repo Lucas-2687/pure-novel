@@ -1,0 +1,2 @@
+# Optional local assistant only; reader.py remains dependency-free.
+playwright==1.64.0
