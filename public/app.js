@@ -4,6 +4,8 @@ let DB_KEY = 'pure-novel-v1';
 let account = null, cloudMode = false, cloudVersion = 0, dirty = false, syncTimer = null, syncing = false, syncBlocked = false;
 let cacheName = 'pure-novel-chapters';
 const DEFAULTS = { size: 21, line: '1.95', font: 'serif', theme: 'paper' };
+const DAY_PALETTES = ['almond', 'mist', 'blue'];
+const READING_THEMES = { paper: '纸白', almond: '暖杏', green: '豆沙绿', mist: '雾灰', blue: '浅蓝', night: '夜读' };
 let state = { books: [], settings: { ...DEFAULTS } };
 try {
   const saved = JSON.parse(localStorage.getItem(DB_KEY) || 'null');
@@ -497,19 +499,38 @@ function renderShelf() {
     card.append(open, actions); $('shelf').append(card);
   }
 }
+function readingTheme(settings = state.settings) {
+  if (settings.theme === 'night' || settings.theme === 'green') return settings.theme;
+  return settings.theme === 'paper' && DAY_PALETTES.includes(settings.dayPalette) ? settings.dayPalette : 'paper';
+}
+function selectReadingTheme(theme) {
+  if (!Object.hasOwn(READING_THEMES, theme)) return;
+  if (DAY_PALETTES.includes(theme)) {
+    state.settings.theme = 'paper'; state.settings.dayPalette = theme;
+  } else {
+    state.settings.theme = theme;
+    if (theme !== 'night') delete state.settings.dayPalette;
+  }
+  applySettings(); save();
+}
 function applySettings() {
   const s = state.settings;
   if (!['paper', 'green', 'night'].includes(s.theme)) s.theme = 'paper';
   s.size = Math.max(16, Math.min(30, Number(s.size) || 21));
   if (!['1.7', '1.95', '2.2'].includes(s.line)) s.line = '1.95';
   if (!['serif', 'sans-serif'].includes(s.font)) s.font = 'serif';
-  document.body.dataset.theme = s.theme;
+  const theme = readingTheme(s);
+  document.body.dataset.theme = theme;
+  document.documentElement.style.colorScheme = theme === 'night' ? 'dark' : 'light';
+  const background = getComputedStyle(document.body).getPropertyValue('--bg').trim();
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', background);
   document.documentElement.style.setProperty('--font-size', `${s.size}px`);
   document.documentElement.style.setProperty('--line-height', s.line);
   document.documentElement.style.setProperty('--reading-font', s.font);
   $('font-size').value = s.size; $('font-output').textContent = `${s.size}px`;
   $('line-height').value = s.line; $('font-family').value = s.font;
-  document.querySelectorAll('[data-theme]').forEach(n => { if (n.tagName === 'BUTTON') n.setAttribute('aria-pressed', String(n.dataset.theme === s.theme)); });
+  document.querySelectorAll('button[data-theme]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.theme === theme)));
+  $('theme-status').textContent = `当前配色：${READING_THEMES[theme]}${theme === 'green' ? ' · 护眼推荐' : ''}`;
 }
 function busy(value) {
   pending = value; $('busy').hidden = !value; $('import-button').disabled = value;
@@ -697,7 +718,7 @@ $('content').addEventListener('click', () => { if (!getSelection()?.toString()) 
 for (const [id, key] of [['font-size', 'size'], ['line-height', 'line'], ['font-family', 'font']]) {
   $(id).addEventListener('input', event => { state.settings[key] = event.target.value; applySettings(); save(); });
 }
-document.querySelectorAll('button[data-theme]').forEach(button => button.addEventListener('click', () => { state.settings.theme = button.dataset.theme; applySettings(); save(); }));
+document.querySelectorAll('button[data-theme]').forEach(button => button.addEventListener('click', () => selectReadingTheme(button.dataset.theme)));
 $('clear-cache').addEventListener('click', async () => {
   const db = await cacheDB;
   if (!db) return toast('章节缓存不可用。');

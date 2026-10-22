@@ -43,7 +43,26 @@
     <button id="exit-focus" class="exit-focus" hidden>退出沉浸</button>
   </section>
   <dialog id="catalog-dialog"><div class="dialog-head"><div><span class="eyebrow">CONTENTS</span><h2>章节目录</h2></div><button class="close-dialog icon-button" aria-label="关闭目录">×</button></div><p id="catalog-status" class="hint"></p><div id="chapters" class="chapters"></div><button id="catalog-more" hidden>加载下一页目录</button></dialog>
-  <dialog id="settings-dialog"><div class="dialog-head"><h2>阅读偏好</h2><button class="close-dialog icon-button" aria-label="关闭设置">×</button></div><label class="setting-row">字号 <input id="font-size" type="range" min="16" max="30" step="1"><output id="font-output"></output></label><label class="setting-row">行距 <select id="line-height"><option value="1.7">紧凑</option><option value="1.95">舒适</option><option value="2.2">宽松</option></select></label><label class="setting-row">字体 <select id="font-family"><option value="serif">宋体 / 衬线</option><option value="sans-serif">系统黑体</option></select></label><div class="setting-row">背景 <div class="themes"><button data-theme="paper">纸白</button><button data-theme="green">青绿</button><button data-theme="night">夜读</button></div></div><p class="hint">点击正文可切换沉浸模式；进度自动保存在本机。</p><button id="clear-cache" class="text-button">清除本机章节缓存</button></dialog>
+  <dialog id="settings-dialog" aria-labelledby="reading-preferences-title">
+    <div class="dialog-head"><h2 id="reading-preferences-title">阅读偏好</h2><button class="close-dialog icon-button" aria-label="关闭设置">×</button></div>
+    <label class="setting-row">字号 <input id="font-size" type="range" min="16" max="30" step="1"><output id="font-output"></output></label>
+    <label class="setting-row">行距 <select id="line-height"><option value="1.7">紧凑</option><option value="1.95">舒适</option><option value="2.2">宽松</option></select></label>
+    <label class="setting-row">字体 <select id="font-family"><option value="serif">宋体 / 衬线</option><option value="sans-serif">系统黑体</option></select></label>
+    <fieldset class="theme-section">
+      <legend>日间配色</legend>
+      <div class="theme-grid">
+        <button type="button" class="theme-card" data-theme="paper" aria-pressed="true"><span class="theme-swatch" aria-hidden="true">阅</span><span>纸白</span><span class="theme-badge"></span><span class="theme-check" aria-hidden="true">已选</span></button>
+        <button type="button" class="theme-card" data-theme="almond" aria-pressed="false"><span class="theme-swatch" aria-hidden="true">阅</span><span>暖杏</span><span class="theme-badge"></span><span class="theme-check" aria-hidden="true">已选</span></button>
+        <button type="button" class="theme-card" data-theme="green" aria-pressed="false"><span class="theme-swatch" aria-hidden="true">阅</span><span>豆沙绿</span><span class="theme-badge">护眼推荐</span><span class="theme-check" aria-hidden="true">已选</span></button>
+        <button type="button" class="theme-card" data-theme="mist" aria-pressed="false"><span class="theme-swatch" aria-hidden="true">阅</span><span>雾灰</span><span class="theme-badge"></span><span class="theme-check" aria-hidden="true">已选</span></button>
+        <button type="button" class="theme-card" data-theme="blue" aria-pressed="false"><span class="theme-swatch" aria-hidden="true">阅</span><span>浅蓝</span><span class="theme-badge"></span><span class="theme-check" aria-hidden="true">已选</span></button>
+      </div>
+    </fieldset>
+    <div class="theme-night-row"><button type="button" class="theme-card" data-theme="night" aria-pressed="false"><span class="theme-swatch" aria-hidden="true">阅</span><span>夜读</span><span class="theme-badge"></span><span class="theme-check" aria-hidden="true">已选</span></button><p class="hint">手动选择，阅读中不会自动换色。</p></div>
+    <p id="theme-status" role="status" aria-live="polite">当前配色：纸白</p>
+    <p class="hint">按个人感受选择配色，屏幕亮度请在系统中调整。点击正文可切换沉浸模式；进度自动保存在本机。</p>
+    <button id="clear-cache" class="text-button">清除本机章节缓存</button>
+  </dialog>
   <dialog id="help-dialog"><div class="dialog-head"><h2>把纯阅放在桌面</h2><button class="close-dialog icon-button" aria-label="关闭帮助">×</button></div><p>iPhone：使用 Safari 打开，点“分享”→“添加到主屏幕”。</p><p>Android：使用支持安装的浏览器，在菜单中选择“安装应用”或“添加到主屏幕”。</p><p class="hint">桌面安装和离线外壳需要 HTTPS（本机 localhost 除外）。普通局域网 HTTP 仍可在线阅读，但不保证可安装。</p><p class="hint">最近成功读取的 20 个完整章节会保存在本机，可在书架中离线续读。缓存可能被系统清理，不等于永久下载。</p></dialog>
   <div id="busy" class="busy" role="status" hidden><span class="spinner"></span><span>正在整理文字…</span></div>
   <div id="toast" class="toast" role="status" hidden></div>

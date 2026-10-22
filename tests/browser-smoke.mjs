@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { storageChecks } from './storage-checks.mjs';
 import { cloudOfflineChecks } from './cloud-offline-checks.mjs';
+import { themeChecks } from './theme-checks.mjs';
 
 const executable = process.env.BROWSER_PATH || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const base = process.env.READER_URL || 'http://127.0.0.1:8000/';
@@ -51,6 +52,9 @@ try {
   assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, 'Mobile home should not overflow');
   assert.equal(await evaluate('document.querySelector("#mode-ebook, #publication-form, #openbooks, #import-task")'), null, 'External ebook acquisition UI stays removed');
   assert.equal(await evaluate('!!document.getElementById("ebook-file")'), true, 'Manual import remains available');
+  if (process.env.READER_SMOKE_CHECKS === 'themes') {
+    await themeChecks({ evaluate, command, until });
+  } else {
   const errors = await evaluate(`(async () => {
     const original = window.fetch;
     const messages = [];
@@ -466,6 +470,8 @@ try {
   await evaluate('revokeOffline()');
   await storageChecks({ evaluate, command, until });
   await cloudOfflineChecks({ evaluate, command, until, sleep, fixtures: ebookFixtures });
+  await themeChecks({ evaluate, command, until });
+  }
 } finally {
   if (socket?.readyState === WebSocket.OPEN) { await command('Browser.close').catch(() => {}); socket.close(); }
   browser.kill();

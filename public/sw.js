@@ -1,5 +1,5 @@
 'use strict';
-const VERSION = 'pure-novel-shell-v16';
+const VERSION = 'pure-novel-shell-v17';
 const SHELL = ['/', '/style.css', '/ebooks.js', '/storage.js', '/app.js', '/manifest.webmanifest', '/icon.svg'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(VERSION).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));

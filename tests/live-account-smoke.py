@@ -223,6 +223,17 @@ def main():
                     page.locator('#ebook-accept').click()
                     page.locator('#reader').wait_for(state='visible')
                     wait_js('!restoringProgress && !pending')
+                    if os.environ.get('LIVE_THEME_CHECKS') == '1':
+                        phase = 'browser real palette selection'
+                        before = evaluate('({url:current.url,scroll:scrollY})')
+                        page.locator('#settings-button').click()
+                        for theme in ('paper', 'almond', 'green', 'mist', 'blue', 'night', 'blue'):
+                            page.locator('#settings-dialog button[data-theme="' + theme + '"]').click()
+                            if evaluate('document.body.dataset.theme') != theme:
+                                raise AssertionError('Published palette did not render.')
+                        page.locator('#settings-dialog .close-dialog').click()
+                        after = evaluate('({url:current.url,scroll:scrollY})')
+                        check(before['url'] == after['url'] and abs(before['scroll'] - after['scroll']) < 1, 'published-palettes-preserve-chapter-and-position')
                     page.locator('#back').click()
                     evaluate('pushState()')
                     wait_js('!dirty && !syncing', timeout=45)
@@ -239,6 +250,8 @@ def main():
                     page.reload(wait_until='domcontentloaded')
                     page.locator('#home').wait_for(state='visible', timeout=30000)
                     check(page.locator('#offline-banner').is_visible(), 'real-cloud-offline-reload')
+                    if os.environ.get('LIVE_THEME_CHECKS') == '1':
+                        check(evaluate('document.body.dataset.theme') == 'blue', 'published-palette-persists-in-offline-reload')
                     page.locator('#shelf .book-open').filter(has_text=title).click()
                     wait_js('!restoringProgress && !pending')
                     check(page.locator('#chapter-title').inner_text() == 'Chapter 2 Offline', 'real-offline-last-chapter-restored')
@@ -249,6 +262,8 @@ def main():
                     remote = sb('/rest/v1/rpc/reader_context_v2', {}, token=a['token'])[1]
                     restored = next(book for book in remote['payload']['books'] if book['title'] == title)
                     check(restored['lastUrl'].endswith('/1') and 0.45 < restored['progress'] < 0.65, 'real-offline-progress-synced-after-reauth')
+                    if os.environ.get('LIVE_THEME_CHECKS') == '1':
+                        check(remote['payload']['settings'].get('theme') == 'paper' and remote['payload']['settings'].get('dayPalette') == 'blue', 'published-palette-roundtrips-real-supabase')
                     context.close()
                 finally:
                     browser.close()
