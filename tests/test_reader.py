@@ -130,7 +130,7 @@ class SearchTests(unittest.TestCase):
 
     def test_search_resolves_matching_engine_redirect(self):
         html = '<h3><a href="/link?url=abc">测试小说目录</a></h3>'
-        def fetch(url):
+        def fetch(url, deadline=None):
             if '/link?' in url:
                 return '<title>测试小说</title>', 'https://example.com/book/'
             return html, 'https://www.sogou.com/web'
@@ -140,7 +140,7 @@ class SearchTests(unittest.TestCase):
         self.assertTrue(all(e['host'] == 'example.com' for e in result['results']))
 
     def test_failed_engine_redirect_not_reported_as_source(self):
-        def fetch(url):
+        def fetch(url, deadline=None):
             if '/link?' in url:
                 raise reader.ReaderError('已阻止从 HTTPS 降级到 HTTP 的跳转。')
             return '<h3><a href="/link?url=x">测试小说</a></h3>', 'https://www.sogou.com/'
@@ -321,7 +321,7 @@ class HTTPTests(unittest.TestCase):
         cls.thread.join()
 
     def test_all_frontend_assets(self):
-        for path in ('/', '/app.js', '/style.css', '/sw.js', '/manifest.webmanifest', '/icon.svg'):
+        for path in ('/', '/app.js', '/ebooks.js', '/storage.js', '/style.css', '/sw.js', '/manifest.webmanifest', '/icon.svg'):
             with self.subTest(path=path), urlopen(self.base + path) as response:
                 self.assertEqual(response.status, 200)
                 self.assertGreater(len(response.read()), 20)

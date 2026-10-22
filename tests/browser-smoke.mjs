@@ -1,23 +1,25 @@
 // Dependency-free Chromium/Edge smoke test. Start reader.py before running.
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
+import { storageChecks } from './storage-checks.mjs';
+import { cloudOfflineChecks } from './cloud-offline-checks.mjs';
 
 const executable = process.env.BROWSER_PATH || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-const profile = await mkdtemp(join(tmpdir(), 'pure-novel-smoke-'));
-const browser = spawn(executable, ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=9224', `--user-data-dir=${profile}`, 'about:blank'], { stdio: 'ignore' });
+const base = process.env.READER_URL || 'http://127.0.0.1:8000/';
+const profile = await mkdtemp(join(process.cwd(), '.browser-smoke-'));
+const browser = spawn(executable, ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { stdio: 'ignore' });
 let socket;
 let id = 0;
 const waiting = new Map();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-async function command(method, params = {}) {
+async function command(method, params = {}, sessionId) {
   const key = ++id;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { waiting.delete(key); reject(new Error(`CDP timeout: ${method}`)); }, 15000);
     waiting.set(key, result => { clearTimeout(timer); result.error ? reject(new Error(JSON.stringify(result.error))) : resolve(result.result); });
-    socket.send(JSON.stringify({ id: key, method, params }));
+    socket.send(JSON.stringify({ id: key, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
 }
 async function evaluate(expression) {
@@ -32,7 +34,11 @@ async function until(expression) {
 try {
   let target;
   for (let i = 0; i < 60; i++) {
-    try { target = (await (await fetch('http://127.0.0.1:9224/json/list')).json()).find(x => x.type === 'page'); if (target) break; } catch {}
+    try {
+      const port = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0].trim();
+      target = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(x => x.type === 'page');
+      if (target) break;
+    } catch {}
     await sleep(200);
   }
   assert.ok(target, 'Browser debugging target should start');
@@ -40,7 +46,7 @@ try {
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
   socket.onmessage = event => { const result = JSON.parse(event.data); if (waiting.has(result.id)) { waiting.get(result.id)(result); waiting.delete(result.id); } };
   await command('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
-  await command('Page.navigate', { url: 'http://127.0.0.1:8000/' });
+  await command('Page.navigate', { url: base });
   await until('document.documentElement.dataset.ready === "true"');
   assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, 'Mobile home should not overflow');
   assert.equal(await evaluate('document.querySelector("#mode-ebook, #publication-form, #openbooks, #import-task")'), null, 'External ebook acquisition UI stays removed');
@@ -161,7 +167,8 @@ try {
   assert.equal(await evaluate('document.getElementById("catalog-dialog").open'), false, 'Selected source opens without catalog confirmation');
   await evaluate('document.getElementById("back").click()');
   assert.equal(await evaluate('document.querySelectorAll(".book-card").length'), 2);
-  await evaluate('location.reload()');
+  await evaluate('document.documentElement.dataset.ready="reloading"');
+  await command('Page.reload');
   await until('document.documentElement.dataset.ready === "true"');
   assert.equal(await evaluate('document.body.dataset.theme'), 'night', 'Preferences should survive reload');
   assert.equal(await evaluate('document.querySelectorAll(".book-card").length'), 2, 'Shelf should survive reload');
@@ -191,7 +198,8 @@ try {
   await evaluate('document.getElementById("back").click()');
   const savedRatio = await evaluate('state.books.find(b=>b.title==="Cache regression").progress');
   assert.ok(savedRatio > 0.5 && savedRatio < 0.6, 'Back flushes scroll progress');
-  await evaluate('location.reload()');
+  await evaluate('document.documentElement.dataset.ready="reloading"');
+  await command('Page.reload');
   await until('document.documentElement.dataset.ready === "true"');
   await evaluate(`(() => {
     window.readCalls = [];
@@ -258,6 +266,7 @@ try {
   await evaluate(`(() => {
     window.testCloud = {version:0,payload:null};
     window.fetch = async (url,opts) => {
+      if(url==='/api/bootstrap') return new Response(JSON.stringify({user:{id:'account-a',username:'测试读者'},...testCloud}));
       if(url==='/api/state') {
         if(opts?.method==='POST') {
           const data=JSON.parse(opts.body);
@@ -290,7 +299,7 @@ try {
   await evaluate(`state.books.push({id:'cloud-book',title:'私人书架',chapters:[{title:'大目录'}]});save();clearTimeout(syncTimer);pushState()`);
   assert.equal(await evaluate('testCloud.version'), 1);
   assert.equal(await evaluate('testCloud.payload.books[0].chapters === undefined'), true, 'Large catalogs excluded from sync');
-  await evaluate('testCloud.version=2; save(); clearTimeout(syncTimer); pushState()');
+  await evaluate('testCloud.version=2; state.settings.size=22; save(); clearTimeout(syncTimer); pushState()');
   assert.equal(await evaluate('document.getElementById("conflict-dialog").open'), true, 'Conflicts must be explicit');
   await evaluate('document.getElementById("keep-cloud").click()');
   await until('!document.getElementById("conflict-dialog").open');
@@ -438,7 +447,8 @@ try {
     return result;
   })()`);
   assert.equal(scopeImport,true,'Changed account during parsing does not receive import preview or data');
-  await evaluate('location.reload()');
+  await evaluate('document.documentElement.dataset.ready="reloading"');
+  await command('Page.reload');
   await until('document.documentElement.dataset.ready === "true"');
   // Account B data persists in its namespace and is not visible in anonymous mode.
   assert.equal(await evaluate('state.books.some(b=>b.title==="Manual edited")'), false);
@@ -453,6 +463,9 @@ try {
   console.log('PASS: EPUB nav/NCX labels, EPUB file-input confirmation and navigation, GB18030 text, encryption rejection, parse account guard');
   console.log('PASS: mobile layout, error diagnosis, multi-source search/check states, import, catalog, chapter, safe text, immersion, settings, shelf persistence');
   console.log('PASS: cloud account isolation, cache namespaces, metadata sync, explicit version conflicts (mock API)');
+  await evaluate('revokeOffline()');
+  await storageChecks({ evaluate, command, until });
+  await cloudOfflineChecks({ evaluate, command, until, sleep, fixtures: ebookFixtures });
 } finally {
   if (socket?.readyState === WebSocket.OPEN) { await command('Browser.close').catch(() => {}); socket.close(); }
   browser.kill();

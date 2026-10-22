@@ -6,6 +6,7 @@ __pycache__/
 .env.*
 !.env.example
 .vercel/
+supabase/.temp/
 # Private development notes and live diagnostic reports
 HANDOFF.md
 ASSISTANT.md

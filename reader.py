@@ -16,7 +16,11 @@ import time
 import zlib
 import cloud
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, wait
+from copy import deepcopy
+from contextvars import copy_context
+import observability
+import request_budget as budget
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request
@@ -38,9 +42,91 @@ SEARCH_ENGINES = {
     '搜狗': 'https://www.sogou.com/web?query=',
 }
 SEARCH_CACHE = OrderedDict()
+REQUEST_SECONDS = 45
+READING_INFLIGHT = {}
+READING_WORKERS = budget.BoundedWorkers(4, 'reader-reading')
+CHECK_WORKERS = budget.BoundedWorkers(4, 'reader-check')
+SEARCH_WORKERS = budget.BoundedWorkers(16, 'reader-search')
+REDIRECT_WORKERS = budget.BoundedWorkers(16, 'reader-redirect')
+
+
+class ReaderError(Exception):
+    pass
+
+
+class ReaderTimeout(ReaderError, budget.DeadlineExceeded):
+    pass
+
+
+def remaining(deadline):
+    return budget.remaining(deadline, ReaderTimeout)
+
+
+def request_deadline(deadline=None):
+    return time.monotonic() + REQUEST_SECONDS if deadline is None else deadline
+
+
+def await_result(future, deadline):
+    try:
+        return future.result(timeout=remaining(deadline))
+    except TimeoutError:
+        raise ReaderTimeout('请求处理超时，请稍后重试。') from None
+
+
+def submit(workers, function, *args, **kwargs):
+    try:
+        return workers.submit(copy_context().run, function, *args, **kwargs)
+    except budget.CapacityExceeded as exc:
+        raise ReaderError(str(exc)) from None
+
+
+def timed_fetch(url, deadline):
+    with observability.measure('fetch'):
+        remaining(deadline)
+        result = fetch_page(url, deadline=deadline)
+        remaining(deadline)
+        return result
+
+
+def timed_parse(html, url, deadline):
+    remaining(deadline)
+    result = parse_page(html, url)
+    remaining(deadline)
+    return result
+
+
+def acquire_openbook(key, deadline):
+    connections = budget.Connections()
+
+    def addresses(host, port):
+        connections.check(deadline)
+        result = public_addresses(host, port)
+        connections.check(deadline)
+        return result
+
+    def connection(host, address, secure):
+        seconds = connections.check(deadline)
+        conn = PinnedConnection(host, address, secure)
+        conn.timeout = min(6, seconds)
+        conn.deadline = deadline
+        connections.add(conn)
+        return conn
+
+    future = None
+    with observability.measure('fetch'):
+        try:
+            remaining(deadline)
+            future = submit(budget.NETWORK_WORKERS, openbooks.acquire, key, addresses, connection)
+            return await_result(future, deadline)
+        finally:
+            connections.cancel()
+            if future is not None:
+                future.cancel()
 
 
 def failure_kind(message: str) -> str:
+    if '超时' in message:
+        return 'timeout'
     if '403' in message or '验证' in message:
         return 'blocked'
     if '匹配' in message:
@@ -130,56 +216,108 @@ def search_results(html: str, base: str, query: str, engine: str) -> list[dict]:
     return results
 
 
-def find_books(query: str, round: int = 0) -> dict:
+def find_books(query: str, round: int = 0, deadline=None) -> dict:
     query = search_term(query)
     if type(round) is not int or not 0 <= round <= 2:
         raise ReaderError('搜索轮次必须为 0～2。')
+    deadline = request_deadline(deadline)
+    remaining(deadline)
     key = (query, round)
     with CACHE_LOCK:
         hit = SEARCH_CACHE.get(key)
         if hit and time.monotonic() - hit[0] < 120:
-            return {**hit[1], 'cached': True}
+            return {**deepcopy(hit[1]), 'cached': True}
     suffix = (' 小说 目录', ' 小说 最新章节', ' 全文阅读 章节目录')[round]
+    progress, progress_lock = {}, threading.Lock()
+
+    def status(name, entries, state, message=''):
+        return entries, {'engine': name, 'state': state, 'count': len(entries), 'message': message}
+
+    def publish(name, entries):
+        with progress_lock:
+            progress[name] = deepcopy(entries)
 
     def run(item):
         name, endpoint = item
+        entries, redirects = [], []
         try:
-            html, final = fetch_page(endpoint + quote('"' + query + '"' + suffix))
-            if re.search(r'<title[^>]*>[^<]*(?:验证码|安全验证|访问验证|访问受限|人机验证)', html, re.I):
+            html, final = timed_fetch(endpoint + quote('"' + query + '"' + suffix), deadline)
+            reject_challenge(html)
+            if re.search(r'<title[^>]*>[^<]*访问受限', html, re.I):
                 raise ReaderError('搜索入口要求验证，未尝试绕过。')
-            entries = search_results(html, final, query, name)
-            unresolved = [e for e in entries if e.get('redirect')][:4]
-            def resolve(entry):
-                try:
-                    _, target = fetch_page(entry['url'])
-                    host = urlsplit(target).hostname
-                    if host in ('www.sogou.com', 'www.so.com', 'www.baidu.com') or non_reading_url(target):
-                        return None, '中转链接未到达可用的阅读网站。'
-                    return {**entry, 'url': target, 'host': host, 'redirect': False}, ''
-                except (ReaderError, OSError, http.client.HTTPException) as exc:
-                    return None, str(exc)[:120]
-            redirect_errors = []
-            if unresolved:
-                with ThreadPoolExecutor(max_workers=4) as resolver:
-                    outcomes = list(resolver.map(resolve, unresolved))
-                    resolved = [e for e, error in outcomes if e]
-                    redirect_errors = list(dict.fromkeys(error for e, error in outcomes if error))
-                entries = [e for e in entries if not e.get('redirect')] + resolved
-            if not entries and redirect_errors:
-                return [], {'engine': name, 'state': 'redirect_failed', 'count': 0,
-                            'message': '已发现匹配标题，但中转解析失败：' + '；'.join(redirect_errors)[:160]}
-            return entries, {'engine': name, 'state': 'ok' if entries else 'empty_or_unparsed',
-                             'count': len(entries), 'message': '' if entries else '未提取到匹配结果：可能无匹配、跳转链接未支持或页面结构变化。'}
-        except (ReaderError, OSError, http.client.HTTPException) as exc:
-            return [], {'engine': name, 'state': failure_kind(str(exc)), 'count': 0, 'message': str(exc)[:200]}
+            parsed = search_results(html, final, query, name)
+            remaining(deadline)
+            entries = [e for e in parsed if not e.get('redirect')]
+            publish(name, entries)
 
+            def resolve(entry):
+                _, target = timed_fetch(entry['url'], deadline)
+                host = urlsplit(target).hostname
+                if host in ('www.sogou.com', 'www.so.com', 'www.baidu.com') or non_reading_url(target):
+                    raise ReaderError('中转链接未到达可用的阅读网站。')
+                resolved = {**entry, 'url': target, 'host': host, 'redirect': False}
+                with progress_lock:
+                    progress[name].append(deepcopy(resolved))
+                return resolved
+
+            errors = []
+            for entry in [e for e in parsed if e.get('redirect')][:4]:
+                remaining(deadline)
+                try:
+                    redirects.append(submit(REDIRECT_WORKERS, resolve, entry))
+                except ReaderError as exc:
+                    errors.append(str(exc))
+            if redirects:
+                wait(redirects, timeout=max(0, deadline - time.monotonic()))
+                for future in redirects:
+                    if not future.done():
+                        future.cancel()
+                        errors.append('中转解析超时。')
+                        continue
+                    try:
+                        future.result()
+                    except (ReaderError, OSError, http.client.HTTPException) as exc:
+                        errors.append(str(exc)[:120])
+                with progress_lock:
+                    entries = deepcopy(progress[name])
+            if errors:
+                message = '部分中转解析失败：' + '；'.join(dict.fromkeys(errors))[:160]
+                return status(name, entries, 'timeout' if any('超时' in e for e in errors) else 'redirect_failed', message)
+            return status(name, entries, 'ok' if entries else 'empty_or_unparsed',
+                          '' if entries else '未提取到匹配结果：可能无匹配、跳转链接未支持或页面结构变化。')
+        except (ReaderError, OSError, http.client.HTTPException) as exc:
+            with progress_lock:
+                entries = deepcopy(progress.get(name, entries))
+            return status(name, entries, failure_kind(str(exc)), str(exc)[:200])
+        finally:
+            for future in redirects:
+                future.cancel()
+
+    jobs, outcomes = {}, {}
+    for item in SEARCH_ENGINES.items():
+        name = item[0]
+        try:
+            remaining(deadline)
+            jobs[name] = submit(SEARCH_WORKERS, run, item)
+        except ReaderError as exc:
+            outcomes[name] = status(name, [], failure_kind(str(exc)), str(exc))
+    if jobs:
+        wait(jobs.values(), timeout=max(0, deadline - time.monotonic()))
+    for name, future in jobs.items():
+        if future.done():
+            outcomes[name] = future.result()
+        else:
+            future.cancel()
+            with progress_lock:
+                entries = deepcopy(progress.get(name, []))
+            outcomes[name] = status(name, entries, 'timeout', '搜索处理超时，已保留完成的结果；不是书籍不存在。')
     merged, warnings, groups, statuses = {}, [], [], []
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        for entries, warning in pool.map(run, SEARCH_ENGINES.items()):
-            statuses.append(warning)
-            if warning['state'] != 'ok':
-                warnings.append(warning)
-            groups.append(entries)
+    for name in SEARCH_ENGINES:
+        entries, warning = outcomes[name]
+        statuses.append(warning)
+        if warning['state'] != 'ok':
+            warnings.append(warning)
+        groups.append(entries)
     # Interleave engines so the first page is not monopolized by one index.
     for i in range(max((len(group) for group in groups), default=0)):
         for group in groups:
@@ -188,32 +326,45 @@ def find_books(query: str, round: int = 0) -> dict:
                 if entry['url'] in merged:
                     merged[entry['url']]['engines'].extend(entry['engines'])
                 else:
-                    merged[entry['url']] = entry
+                    merged[entry['url']] = deepcopy(entry)
     result = {'query': query, 'round': round, 'hasMore': round < 2,
               'results': list(merged.values())[:20], 'warnings': warnings, 'engines': statuses,
               'sites': len({entry['host'].removeprefix('www.').removeprefix('m.') for entry in merged.values()}),
               'note': '搜索结果不代表可读或获得授权；样本检查不保证全书完整。'}
-    with CACHE_LOCK:
-        SEARCH_CACHE[key] = (time.monotonic(), result)
-        while len(SEARCH_CACHE) > 64:
-            SEARCH_CACHE.popitem(last=False)
+    if result['results']:
+        with CACHE_LOCK:
+            SEARCH_CACHE[key] = (time.monotonic(), deepcopy(result))
+            while len(SEARCH_CACHE) > 64:
+                SEARCH_CACHE.popitem(last=False)
     return result
 
 
-def check_source(query: str, url: str) -> dict:
+def check_source(query: str, url: str, deadline=None) -> dict:
     query = search_term(query)
-    url = reading_url(url)
+    url = reading_url(validate_url(url))
     if non_reading_url(url):
         raise ReaderError('百科、问答等非阅读页面，已排除。')
-    html, final = fetch_page(url)
+    deadline = request_deadline(deadline)
+    remaining(deadline)
+    future = submit(CHECK_WORKERS, _check_source, query, url, deadline)
+    try:
+        return await_result(future, deadline)
+    finally:
+        future.cancel()
+
+
+def _check_source(query, url, deadline):
+    html, final = timed_fetch(url, deadline)
     reject_challenge(html)
     try:
-        page = parse_page(html, final)
+        page = timed_parse(html, final, deadline)
     except ReaderError as original:
         # Follow only explicit reading entries on a matching book introduction.
         if '没有识别到正文或目录' not in str(original):
             raise
+        remaining(deadline)
         nodes = list(Document(html).root.walk())
+        remaining(deadline)
         heading = ' '.join(n.text() for n in nodes if n.tag in ('h1', 'title'))
         if normalized_title(query) not in normalized_title(heading):
             raise ReaderError('页面未匹配目标书籍，未继续查找阅读入口。') from None
@@ -227,16 +378,16 @@ def check_source(query: str, url: str) -> dict:
         page = None
         for link in targets[:2]:
             try:
-                child, resolved = fetch_page(link)
+                child, resolved = timed_fetch(link, deadline)
                 if not same_site(final, resolved):
                     continue
                 reject_challenge(child)
-                candidate = parse_page(child, resolved)
+                candidate = timed_parse(child, resolved, deadline)
                 if normalized_title(query) in normalized_title(candidate['bookTitle']):
                     page, final = candidate, resolved
                     break
             except ReaderError as exc:
-                if '验证' in str(exc) or 'HTTP 403' in str(exc):
+                if isinstance(exc, ReaderTimeout) or '验证' in str(exc) or 'HTTP 403' in str(exc):
                     raise
         if page is None:
             raise ReaderError('已匹配书籍介绍页，但未找到可解析的同站目录或阅读入口。') from None
@@ -250,11 +401,11 @@ def check_source(query: str, url: str) -> dict:
         if not sample_entry:
             raise ReaderError('目录仅含公告或新书推荐，未作为正文样本。')
         sample_url = sample_entry['url']
-        html, resolved = fetch_page(sample_url)
+        html, resolved = timed_fetch(sample_url, deadline)
         if not same_site(final, resolved):
             raise ReaderError('样本章节跳转至其他站点，已停止验证。')
         reject_challenge(html)
-        sample = parse_page(html, resolved)
+        sample = timed_parse(html, resolved, deadline)
         if sample['kind'] != 'chapter':
             raise ReaderError('样本未返回可读正文。')
         if normalized_title(chapter_key(sample_entry['title'])) != normalized_title(chapter_key(sample['title'])):
@@ -265,19 +416,16 @@ def check_source(query: str, url: str) -> dict:
         sample, resolved = page, final
     # Validate complete sample including pagination, not just its first page.
     if sample.get('nextPage'):
-        sample = load_reading(resolved)
+        sample = load_reading(resolved, deadline=deadline)
         if sample['warnings']:
             raise ReaderError('样本章节分页未完整合并，未作为可读来源。')
+    remaining(deadline)
     return {'url': final, 'bookTitle': page['bookTitle'], 'sampleTitle': sample['title'],
             'author': page.get('author', ''),
             'sampleUrl': resolved, 'characters': sum(map(len, sample['paragraphs'])),
             'chapters': len(page['chapters']), 'kind': page['kind'],
             'note': (page.get('accessNote') or '目录已识别；一个完整章节样本通过，不保证全书完整。' if page['kind'] == 'catalog'
                      else '仅当前章节样本通过，未验证目录及全书完整性。')}
-
-
-class ReaderError(Exception):
-    pass
 
 
 def validate_url(raw: str) -> str:
@@ -319,29 +467,61 @@ class PinnedConnection(http.client.HTTPConnection):
         self.ip, self.secure = ip, secure
 
     def connect(self):
+        deadline = getattr(self, 'deadline', None)
+        if deadline is not None:
+            self.timeout = min(self.timeout, remaining(deadline))
         self.sock = socket.create_connection((self.ip, self.port), self.timeout)
-        if self.secure:
-            self.sock = ssl.create_default_context().wrap_socket(self.sock, server_hostname=self.host)
+        try:
+            if deadline is not None:
+                self.sock.settimeout(min(6, remaining(deadline)))
+            if self.secure:
+                self.sock = ssl.create_default_context().wrap_socket(
+                    self.sock, server_hostname=self.host, do_handshake_on_connect=False)
+                if deadline is not None:
+                    self.sock.settimeout(min(6, remaining(deadline)))
+                self.sock.do_handshake()
+            if deadline is not None:
+                remaining(deadline)
+        except BaseException:
+            self.close()
+            raise
 
 
-def fetch_page(raw: str) -> tuple[str, str]:
+def fetch_page(raw: str, deadline=None) -> tuple[str, str]:
     url = validate_url(raw)
-    deadline = time.monotonic() + 24
+    deadline = min(request_deadline(deadline), time.monotonic() + 24)
+    remaining(deadline)
+    connections = budget.Connections()
+    future = submit(budget.NETWORK_WORKERS, _fetch_page, url, deadline, connections)
+    try:
+        return await_result(future, deadline)
+    finally:
+        connections.cancel()
+        future.cancel()
+
+
+def _fetch_page(url, deadline, connections):
     cookies = http.cookiejar.CookieJar()
     visited = set()
     for _ in range(5):
-        if time.monotonic() >= deadline:
-            raise ReaderError('网页请求超时，请稍后重试或更换来源。')
+        remaining(deadline)
         p = urlsplit(url)
         addresses = public_addresses(p.hostname, 443 if p.scheme == 'https' else 80)
+        remaining(deadline)
         response = None
         conn = None
         for ip in addresses[:3]:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
+            try:
+                seconds = connections.check(deadline)
+            except budget.DeadlineExceeded:
+                raise ReaderTimeout('请求处理超时，请稍后重试。') from None
             conn = PinnedConnection(p.hostname, ip, p.scheme == 'https')
-            conn.timeout = min(6, remaining)
+            conn.timeout = min(6, seconds)
+            conn.deadline = deadline
+            try:
+                connections.add(conn)
+            except budget.DeadlineExceeded:
+                raise ReaderTimeout('请求处理超时，请稍后重试。') from None
             try:
                 request = Request(url)
                 cookies.add_cookie_header(request)
@@ -354,12 +534,29 @@ def fetch_page(raw: str) -> tuple[str, str]:
                 }
                 if request.has_header('Cookie'):
                     headers['Cookie'] = request.get_header('Cookie')
+                remaining(deadline)
                 conn.request('GET', p.path + ('?' + p.query if p.query else ''), headers=headers)
+                seconds = remaining(deadline)
+                if conn.sock is not None:
+                    conn.sock.settimeout(min(6, seconds))
+                connections.capture(conn)
                 response = conn.getresponse()
+                remaining(deadline)
                 cookies.extract_cookies(response, request)
                 break
             except (OSError, http.client.HTTPException):
+                if response is not None:
+                    response.close()
+                    response = None
                 conn.close()
+                connections.discard(conn)
+                remaining(deadline)
+            except BaseException:
+                if response is not None:
+                    response.close()
+                conn.close()
+                connections.discard(conn)
+                raise
         if response is None:
             raise ReaderError('无法连接源站：可能是网络、TLS 或源站服务问题。请尝试在浏览器打开原网址。')
         try:
@@ -387,16 +584,19 @@ def fetch_page(raw: str) -> tuple[str, str]:
                 raise ReaderError('源站返回了暂不支持的压缩格式。')
             data = bytearray()
             while True:
-                if time.monotonic() > deadline:
-                    raise ReaderError('网页读取超时，请稍后再试。')
+                seconds = remaining(deadline)
+                if conn.sock is not None:
+                    conn.sock.settimeout(min(6, seconds))
                 chunk = response.read1(min(65536, MAX_BYTES + 1 - len(data)))
                 if not chunk:
                     break
                 data.extend(chunk)
                 if len(data) > MAX_BYTES:
                     raise ReaderError('网页过大，已停止读取。')
+            remaining(deadline)
             if compression != 'identity':
                 data = bytearray(decompress_bounded(bytes(data), compression))
+            remaining(deadline)
             encoding = re.search(r'charset\s*=\s*["\']?([\w-]+)', mime, re.I)
             if not encoding:
                 encoding = re.search(r'charset\s*=\s*["\']?([\w-]+)', bytes(data[:4096]).decode('ascii', 'ignore'), re.I)
@@ -404,11 +604,15 @@ def fetch_page(raw: str) -> tuple[str, str]:
             if codec.lower() in ('gb2312', 'gbk'):
                 codec = 'gb18030'
             try:
-                return bytes(data).decode(codec, 'replace'), url
+                text = bytes(data).decode(codec, 'replace')
+                remaining(deadline)
+                return text, url
             except LookupError:
                 raise ReaderError('源站使用了无法识别的文字编码。') from None
         finally:
+            response.close()
             conn.close()
+            connections.discard(conn)
     raise ReaderError('网页重定向次数过多。')
 
 
@@ -692,17 +896,63 @@ def parse_page(html: str, url: str) -> dict:
             'chapters': chapters, **nav}
 
 
-def load_reading(raw: str) -> dict:
+def load_reading(raw: str, deadline=None) -> dict:
     url = reading_url(validate_url(raw))
+    deadline = request_deadline(deadline)
+    remaining(deadline)
+    owner = False
     with CACHE_LOCK:
         cached = CACHE.get(url)
         if cached and time.monotonic() - cached[0] < 300:
             CACHE.move_to_end(url)
-            return cached[1]
-    html, final = fetch_page(url)
-    result = parse_page(html, final)
+            return deepcopy(cached[1])
+        task = READING_INFLIGHT.get(url)
+        if task is None:
+            task = {'future': Future(), 'partial': None}
+            READING_INFLIGHT[url] = task
+            owner = True
+    if owner:
+        try:
+            submit(READING_WORKERS, _reading_task, url, deadline, task, future=task['future'])
+        except BaseException as exc:
+            with CACHE_LOCK:
+                if READING_INFLIGHT.get(url) is task:
+                    del READING_INFLIGHT[url]
+            task['future'].set_exception(exc)
+    try:
+        return deepcopy(await_result(task['future'], deadline))
+    except ReaderTimeout:
+        with CACHE_LOCK:
+            partial = deepcopy(task['partial'])
+        if partial and partial['kind'] == 'chapter' and partial.get('nextPage'):
+            partial['warnings'].append('章节分页处理超时，当前内容可能不完整；请打开原网页核对或重试。')
+            return partial
+        raise
+
+
+def _reading_task(url, deadline, task):
+    try:
+        result = _load_reading(url, deadline, task)
+        if not result['warnings']:
+            remaining(deadline)
+            with CACHE_LOCK:
+                CACHE[url] = (time.monotonic(), deepcopy(result))
+                while len(CACHE) > 64:
+                    CACHE.popitem(last=False)
+        return result
+    finally:
+        with CACHE_LOCK:
+            if READING_INFLIGHT.get(url) is task:
+                del READING_INFLIGHT[url]
+
+
+def _load_reading(url, deadline, task):
+    html, final = timed_fetch(url, deadline)
+    result = timed_parse(html, final, deadline)
     result['warnings'] = []
     result['pages'] = 1
+    with CACHE_LOCK:
+        task['partial'] = deepcopy(result)
     if result['kind'] == 'chapter':
         visited = {final}
         hashes = {hashlib.sha256('\n'.join(result['paragraphs']).encode()).hexdigest()}
@@ -714,10 +964,10 @@ def load_reading(raw: str) -> dict:
             if not same_site(final, target):
                 raise ReaderError('章节分页指向其他站点，已停止读取。')
             try:
-                html, resolved = fetch_page(target)
+                html, resolved = timed_fetch(target, deadline)
                 if not same_site(final, resolved) or resolved in visited:
                     raise ReaderError('分页发生异常跳转。')
-                page = parse_page(html, resolved)
+                page = timed_parse(html, resolved, deadline)
                 if page['kind'] != 'chapter' or chapter_key(page['title']) != chapter_key(result['title']):
                     raise ReaderError('分页章节标题不一致。')
                 digest = hashlib.sha256('\n'.join(page['paragraphs']).encode()).hexdigest()
@@ -729,67 +979,112 @@ def load_reading(raw: str) -> dict:
                 result['nextPage'] = page['nextPage']
                 result['next'] = page['next']
                 result['pages'] += 1
-            except (ReaderError, OSError, http.client.HTTPException):
-                result['warnings'].append('后续分页未能完整合并，请打开原网页核对；当前内容可能不完整。')
+                with CACHE_LOCK:
+                    task['partial'] = deepcopy(result)
+            except (ReaderError, OSError, http.client.HTTPException) as exc:
+                result['warnings'].append(
+                    '章节分页处理超时，当前内容可能不完整；请打开原网页核对或重试。'
+                    if isinstance(exc, TimeoutError) else
+                    '后续分页未能完整合并，请打开原网页核对；当前内容可能不完整。')
                 break
-    if not result['warnings']:
-        with CACHE_LOCK:
-            CACHE[url] = (time.monotonic(), result)
-            while len(CACHE) > 64:
-                CACHE.popitem(last=False)
     return result
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = 'PureNovel/0.1'
+    get_routes = ('/api/health', '/api/session', '/api/state', '/api/bootstrap')
+    post_routes = ('/api/read', '/api/search', '/api/check', '/api/login', '/api/logout',
+                   '/api/state', '/api/publications', '/api/openbooks', '/api/openbooks/acquire')
 
     def log_message(self, fmt, *args):
-        # Avoid logging user reading URLs and query strings.
+        # Request logs contain route names only, never URLs, headers or bodies.
         pass
 
+    def dispatch(self, callback):
+        self.outgoing = []
+        self.deadline = request_deadline()
+        self.route = urlsplit(self.path).path
+        route = self.route if self.route in self.get_routes + self.post_routes else ('unknown_api' if self.route.startswith('/api/') else 'static')
+        trace = observability.Trace(route, self.command)
+        marker = observability.CURRENT.set(trace)
+        self.response_status = 500
+        try:
+            callback()
+        except (budget.DeadlineExceeded, TimeoutError):
+            self.json_response(504, {'error': '请求处理超时，请稍后重试。', 'category': 'timeout'})
+        except cloud.CloudError as exc:
+            self.json_response(exc.status, {'error': str(exc)})
+        finally:
+            trace.finish(self.response_status)
+            observability.CURRENT.reset(marker)
+
     def send_data(self, status, data, content_type):
+        self.response_status = status
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(data)))
         for name, value in getattr(self, 'outgoing', []):
             self.send_header(name, value)
+        trace = observability.CURRENT.get()
+        if trace is not None:
+            for name, value in trace.headers():
+                self.send_header(name, value)
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'no-referrer')
         self.send_header('Cache-Control', 'no-store' if self.path.startswith('/api/') else 'no-cache')
         self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
         self.end_headers()
-        self.wfile.write(data)
+        if self.command != 'HEAD':
+            self.wfile.write(data)
 
     def json_response(self, status, obj):
         self.send_data(status, json.dumps(obj, ensure_ascii=False).encode(), 'application/json; charset=utf-8')
 
     def do_GET(self):
-        self.outgoing = []
-        if self.path == '/api/health':
+        self.dispatch(self.get_resource)
+
+    def do_HEAD(self):
+        self.dispatch(self.get_resource)
+
+    def get_resource(self):
+        path = self.route
+        if self.command == 'HEAD' and path in self.get_routes + self.post_routes and path != '/api/health':
+            self.outgoing.append(('Allow', 'GET, POST' if path == '/api/state' else ('GET' if path in self.get_routes else 'POST')))
+            return self.json_response(405, {'error': '此接口不支持 HEAD。'})
+        if path == '/api/health':
             return self.json_response(200, {'ok': True, 'authRequired': cloud.required()})
-        if self.path in ('/api/session', '/api/state'):
-            try:
-                if not cloud.required():
-                    return self.json_response(200, {'local': True})
-                user, token = cloud.authenticate(self.headers, self.outgoing)
-                if self.path == '/api/session':
-                    return self.json_response(200, {'user': user})
-                rows = cloud.remote('/rest/v1/reader_states?select=version,payload', token=token)
-                return self.json_response(200, rows[0] if rows else {'version': 0, 'payload': None})
-            except cloud.CloudError as exc:
-                return self.json_response(exc.status, {'error': str(exc)})
+        if path in ('/api/session', '/api/state', '/api/bootstrap'):
+            if not cloud.required():
+                return self.json_response(200, {'local': True})
+            result = cloud.with_budget(cloud.context, self.headers, self.outgoing, deadline=self.deadline,
+                                       include_state=path != '/api/session')
+            if path == '/api/session':
+                result = {'user': result['user']}
+            elif path == '/api/state':
+                result = {'version': result['version'], 'payload': result['payload']}
+            return self.json_response(200, result)
+        if path.startswith('/api/'):
+            return self.json_response(404, {'error': '接口不存在。'})
         files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
                  '/ebooks.js': ('ebooks.js', 'text/javascript; charset=utf-8'),
+                 '/storage.js': ('storage.js', 'text/javascript; charset=utf-8'),
                  '/style.css': ('style.css', 'text/css; charset=utf-8'), '/sw.js': ('sw.js', 'text/javascript; charset=utf-8'),
                  '/manifest.webmanifest': ('manifest.webmanifest', 'application/manifest+json'), '/icon.svg': ('icon.svg', 'image/svg+xml')}
-        item = files.get(urlsplit(self.path).path)
+        item = files.get(path)
         if not item:
             return self.json_response(404, {'error': '页面不存在。'})
-        self.send_data(200, (ROOT / 'public' / item[0]).read_bytes(), item[1])
+        try:
+            data = (ROOT / 'public' / item[0]).read_bytes()
+        except FileNotFoundError:
+            return self.json_response(404, {'error': '页面不存在。'})
+        self.send_data(200, data, item[1])
 
     def do_POST(self):
-        self.outgoing = []
-        if self.path not in ('/api/read', '/api/search', '/api/check', '/api/login', '/api/logout', '/api/state', '/api/publications', '/api/openbooks', '/api/openbooks/acquire'):
+        self.dispatch(self.post_resource)
+
+    def post_resource(self):
+        path = self.route
+        if path not in self.post_routes:
             return self.json_response(404, {'error': '接口不存在。'})
         origin = self.headers.get('Origin')
         if origin and urlsplit(origin).netloc != self.headers.get('Host'):
@@ -798,62 +1093,83 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_response(415, {'error': '只接受 JSON 请求。'})
         try:
             length = int(self.headers.get('Content-Length', '0'))
-            if not 0 < length <= (510000 if self.path == '/api/state' else 8192):
+            if length > (510000 if path == '/api/state' else 8192):
+                return self.json_response(413, {'error': '请求数据过大。'})
+            if length <= 0:
                 raise ValueError()
+            self.connection.settimeout(remaining(self.deadline))
             data = json.loads(self.rfile.read(length))
+            remaining(self.deadline)
             if not isinstance(data, dict):
                 raise ValueError()
-            required = ('query',) if self.path in ('/api/search', '/api/publications') else (('query', 'url') if self.path == '/api/check' else (('url',) if self.path == '/api/read' else ()))
+            required = ('query',) if path in ('/api/search', '/api/publications') else (('query', 'url') if path == '/api/check' else (('url',) if path == '/api/read' else ()))
             if any(not isinstance(data.get(key), str) for key in required):
                 raise ValueError()
-        except (ValueError, UnicodeError):
+        except (ValueError, UnicodeError, RecursionError):
             return self.json_response(400, {'error': '请求格式无效。'})
+        deadline = self.deadline
+        if path in ('/api/read', '/api/search', '/api/check'):
+            try:
+                if path in ('/api/search', '/api/check'):
+                    data['query'] = search_term(data['query'])
+                if path in ('/api/read', '/api/check'):
+                    data['url'] = reading_url(validate_url(data['url']))
+                if path == '/api/search':
+                    round = data.get('round', 0)
+                    if type(round) is not int or not 0 <= round <= 2:
+                        raise ReaderError('搜索轮次必须为 0～2。')
+            except ReaderError as exc:
+                return self.json_response(422, {'error': str(exc), 'category': failure_kind(str(exc))})
         try:
-            if self.path == '/api/logout':
+            if path == '/api/logout':
                 token = cloud.cookies(self.headers).get('pn_access')
                 if token and cloud.enabled():
                     try:
-                        cloud.remote('/auth/v1/logout?scope=local', token=token, method='POST')
+                        cloud.with_budget(cloud.remote, '/auth/v1/logout?scope=local', token=token, method='POST', deadline=deadline)
                     except cloud.CloudError:
                         pass
                 self.outgoing.extend(cloud.session_headers())
                 return self.json_response(200, {'ok': True})
-            if self.path == '/api/login':
-                return self.json_response(200, cloud.login(data, self.outgoing))
+            if path == '/api/login':
+                return self.json_response(200, cloud.with_budget(cloud.login, data, self.outgoing, deadline=deadline))
             if cloud.required():
-                user, token = cloud.authenticate(self.headers, self.outgoing)
-                cloud.consume(user['id'], 'sync' if self.path == '/api/state' else ('search' if self.path == '/api/publications' else self.path.rsplit('/', 1)[-1]))
-                if self.path == '/api/state':
-                    return self.json_response(200, cloud.sync(token, data))
-            elif self.path == '/api/state':
+                if path == '/api/state':
+                    return self.json_response(200, cloud.with_budget(cloud.save, self.headers, self.outgoing, data, deadline=deadline))
+                route = ('search' if path in ('/api/publications', '/api/openbooks') else
+                         'read' if path == '/api/openbooks/acquire' else path.rsplit('/', 1)[-1])
+                cloud.with_budget(cloud.authorize, self.headers, self.outgoing, route, deadline=deadline)
+            elif path == '/api/state':
                 return self.json_response(400, {'error': '本地模式不使用云端同步。'})
         except cloud.CloudError as exc:
-            return self.json_response(exc.status, {'error': str(exc)})
+            return self.json_response(exc.status, {'error': str(exc), 'category': failure_kind(str(exc))})
         if not FETCH_SLOTS.acquire(blocking=False):
             return self.json_response(429, {'error': '正在处理其他阅读请求，请稍后再试。'})
         try:
-            if self.path in ('/api/openbooks', '/api/openbooks/acquire'):
+            remaining(deadline)
+            if path in ('/api/openbooks', '/api/openbooks/acquire'):
                 try:
-                    if self.path == '/api/openbooks':
+                    if path == '/api/openbooks':
                         result = openbooks.search(data.get('query'))
                     else:
                         if data.get('authorized') is not True:
                             raise ValueError('请先确认所选公版原文在所在地允许获取与阅读。')
-                        result = openbooks.acquire(data.get('key'), public_addresses, PinnedConnection)
+                        result = acquire_openbook(data.get('key'), deadline)
                 except ValueError as exc:
                     raise ReaderError(str(exc)) from None
-            elif self.path == '/api/publications':
+            elif path == '/api/publications':
                 try:
-                    result = publications.search(data['query'], fetch_page, Document, tidy)
+                    result = publications.search(data['query'], lambda url: timed_fetch(url, deadline), Document, tidy)
                 except ValueError as exc:
                     raise ReaderError(str(exc)) from None
-            elif self.path == '/api/search':
-                result = find_books(data['query'], data.get('round', 0))
-            elif self.path == '/api/check':
-                result = check_source(data['query'], data['url'])
+            elif path == '/api/search':
+                result = find_books(data['query'], data.get('round', 0), deadline=deadline)
+            elif path == '/api/check':
+                result = check_source(data['query'], data['url'], deadline=deadline)
             else:
-                result = load_reading(data['url'])
+                result = load_reading(data['url'], deadline=deadline)
             self.json_response(200, result)
+        except ReaderTimeout as exc:
+            self.json_response(504, {'error': str(exc), 'category': 'timeout'})
         except ReaderError as exc:
             self.json_response(422, {'error': str(exc), 'category': failure_kind(str(exc))})
         except (OSError, http.client.HTTPException):

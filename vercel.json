@@ -1,5 +1,48 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "builds": [{"src": "api/index.py", "use": "@vercel/python", "config": {"maxDuration": 60, "includeFiles": ["public/**"]}}],
-  "routes": [{"src": "/(.*)", "dest": "/api/index.py"}]
+  "framework": null,
+  "regions": ["hnd1"],
+  "buildCommand": "",
+  "outputDirectory": "public",
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60,
+      "includeFiles": "public/**",
+      "excludeFiles": "{tests/**,supabase/**,.venv/**,**/__pycache__/**,*.log,*.md,.env*,acquire.py,manage_user.py,setup_account.py,requirements-assistant.txt,search-validation.json,source-survey.json}"
+    }
+  },
+  "rewrites": [
+    {"source": "/api/:path*", "destination": "/api"}
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {"key": "X-Content-Type-Options", "value": "nosniff"},
+        {"key": "Referrer-Policy", "value": "no-referrer"},
+        {"key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"}
+      ]
+    },
+    {
+      "source": "/((?!api(?:/|$)).*)",
+      "headers": [
+        {"key": "Cache-Control", "value": "public, max-age=0, must-revalidate"}
+      ]
+    },
+    {
+      "source": "/sw.js",
+      "headers": [
+        {"key": "Cache-Control", "value": "no-cache"},
+        {"key": "Service-Worker-Allowed", "value": "/"}
+      ]
+    },
+    {
+      "source": "/api/:path*",
+      "headers": [
+        {"key": "Cache-Control", "value": "private, no-store"},
+        {"key": "CDN-Cache-Control", "value": "no-store"},
+        {"key": "Vercel-CDN-Cache-Control", "value": "no-store"}
+      ]
+    }
+  ]
 }

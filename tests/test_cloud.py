@@ -1,5 +1,7 @@
 import json
 import os
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -121,6 +123,66 @@ class CloudTests(unittest.TestCase):
                 cloud.sync('token', {'version': 0, 'payload': {'books': [], 'settings': {}}})
             self.assertEqual(error.exception.status, 409)
 
+    def test_refresh_membership_and_quota_share_budget(self):
+        uid = '12345678-1234-1234-1234-123456789012'
+        now, calls = [100.0], []
+
+        def remote(path, **kwargs):
+            calls.append((path, kwargs['deadline']))
+            now[0] += 5
+            if path.startswith('/auth/v1/token'):
+                return {'access_token': 'new', 'refresh_token': 'new-refresh'}
+            if path == '/auth/v1/user':
+                return {'id': uid}
+            if path.startswith('/rest/v1/members'):
+                return [{'user_id': uid}]
+            return True
+
+        with patch('cloud.budget.time.monotonic', side_effect=lambda: now[0]), patch('cloud.remote', side_effect=remote):
+            user, token = cloud.authenticate({'Cookie': 'pn_refresh=old'}, [], deadline=145)
+            cloud.consume(user['id'], 'read', deadline=145)
+        self.assertEqual(token, 'new')
+        self.assertEqual([deadline for path, deadline in calls], [145] * 4)
+
+    def test_expired_membership_never_starts_next_remote(self):
+        now = [100.0]
+
+        def remote(path, **kwargs):
+            now[0] = 146
+            return {'id': '12345678-1234-1234-1234-123456789012'}
+
+        with patch('cloud.budget.time.monotonic', side_effect=lambda: now[0]), patch('cloud.remote', side_effect=remote) as call:
+            with self.assertRaises(cloud.CloudError) as error:
+                cloud.member('token', deadline=145)
+            self.assertEqual(error.exception.status, 504)
+            self.assertEqual(call.call_count, 1)
+
+    def test_blocking_cloud_open_retains_network_capacity(self):
+        entered, release = threading.Event(), threading.Event()
+        workers = cloud.budget.BoundedWorkers(1, 'test-cloud-dns')
+
+        def open_url(request, deadline, connections):
+            entered.set()
+            release.wait(2)
+            raise OSError('test connection ended')
+
+        with patch('cloud.config', return_value=('https://cloud.invalid', 'test-key')), patch.object(cloud.budget, 'NETWORK_WORKERS', workers), patch('cloud.budget.open_url', side_effect=open_url) as opener:
+            try:
+                start = time.monotonic()
+                with self.assertRaises(cloud.CloudError) as error:
+                    cloud.remote('/test', deadline=start + 0.06)
+                self.assertEqual(error.exception.status, 504)
+                self.assertTrue(entered.is_set())
+                self.assertLess(time.monotonic() - start, 0.5)
+                with self.assertRaises(cloud.CloudError) as capacity:
+                    cloud.remote('/test', deadline=time.monotonic() + 1)
+                self.assertEqual(capacity.exception.status, 503)
+                self.assertEqual(opener.call_count, 1)
+            finally:
+                release.set()
+                self.assertTrue(workers.slots.acquire(timeout=1))
+                workers.slots.release()
+
     def test_refresh_checks_membership(self):
         outgoing = []
         with patch('cloud.remote', return_value={'access_token': 'new', 'refresh_token': 'new-refresh'}), patch('cloud.member', return_value={'id': 'uid'}):
@@ -158,4 +220,6 @@ class ProtectedHTTPTests(test_reader.HTTPTests):
         with patch.dict(os.environ, {'REQUIRE_AUTH': '1'}), patch('cloud.authenticate', return_value=({'id': 'uid'}, 'token')), patch('cloud.consume') as quota, patch('cloud.sync', return_value={'ok': True, 'version': 3}):
             with urlopen(req) as response:
                 self.assertEqual(json.load(response)['version'], 3)
-            quota.assert_called_once_with('uid', 'sync')
+            quota.assert_called_once()
+            self.assertEqual(quota.call_args.args, ('uid', 'sync'))
+            self.assertGreater(quota.call_args.kwargs['deadline'], time.monotonic())

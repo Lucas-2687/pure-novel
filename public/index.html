@@ -10,10 +10,12 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/style.css">
   <script src="/ebooks.js" defer></script>
+  <script src="/storage.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <section id="login-screen" class="home" hidden><div class="intro"><p class="eyebrow">PURE NOVEL · PRIVATE</p><h1>你的故事，<br>随身而行。</h1><p>仅限受邀成员使用。请使用管理员为你创建的用户名与密码登录，无需邮箱。</p></div><form id="login-form" class="import-card"><label for="username">用户名</label><input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required minlength="3" maxlength="32" pattern="[A-Za-z\u3400-\u4dbf\u4e00-\u9fff][A-Za-z0-9_\u3400-\u4dbf\u4e00-\u9fff]{2,31}" aria-describedby="username-hint"><p id="username-hint" class="hint">3～32 位中文、英文字母、数字或下划线，以中文或字母开头，英文不区分大小写。</p><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256"><button id="login-submit">登录</button><p id="login-error" class="error" role="alert"></p></form></section>
+  <div id="offline-banner" class="warning" role="status" hidden><span id="offline-message">当前为本机离线模式，可阅读已保存的电子书和章节；变更未同步。</span><button id="reconnect-local" class="text-button">重新连接</button></div>
+  <section id="login-screen" class="home" hidden><div class="intro"><p class="eyebrow">PURE NOVEL · PRIVATE</p><h1>你的故事，<br>随身而行。</h1><p>仅限受邀成员使用。请使用管理员为你创建的用户名与密码登录，无需邮箱。成功联网验证后，本设备可离线续读 7 天；到期重新登录即可恢复本机副本和未同步进度。</p></div><form id="login-form" class="import-card"><label for="username">用户名</label><input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required minlength="3" maxlength="32" pattern="[A-Za-z\u3400-\u4dbf\u4e00-\u9fff][A-Za-z0-9_\u3400-\u4dbf\u4e00-\u9fff]{2,31}" aria-describedby="username-hint"><p id="username-hint" class="hint">3～32 位中文、英文字母、数字或下划线，以中文或字母开头，英文不区分大小写。</p><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256"><button id="login-submit">登录</button><p id="login-error" class="error" role="alert"></p></form></section>
   <div id="home" class="home" hidden>
     <div id="account-bar" hidden><span id="account-name"></span> · <span id="account-status"></span><button id="sync-now" class="text-button">同步 / 刷新</button><button id="import-local" class="text-button" hidden>导入旧版书架</button><button id="logout" class="text-button">退出并清除本机数据</button></div>
     <header class="home-header"><a class="brand" href="/">纯阅<span>PURE NOVEL</span></a><span class="quiet">少一点打扰，多一点想象。</span></header>
@@ -46,6 +48,6 @@
   <div id="busy" class="busy" role="status" hidden><span class="spinner"></span><span>正在整理文字…</span></div>
   <div id="toast" class="toast" role="status" hidden></div>
   <dialog id="ebook-confirm" aria-labelledby="ebook-confirm-title"><h2 id="ebook-confirm-title">核对电子书</h2><form id="ebook-confirm-form"><p id="ebook-info" class="hint"></p><label for="ebook-title">书名</label><input id="ebook-title" required maxlength="200"><label for="ebook-author">作者（可留空）</label><input id="ebook-author" maxlength="200"><p id="ebook-warning" class="hint"></p><p id="ebook-match" class="hint"></p><h3>正文预览</h3><pre id="ebook-preview"></pre><p class="hint">请确认你有权使用此文件。确认后仅保存至当前账号的本机浏览器。</p><p id="ebook-confirm-error" class="error" role="alert"></p><div class="ebook-actions"><button id="ebook-accept" type="submit">导入并阅读</button><button id="ebook-cancel" type="button" class="text-button">取消</button></div></form></dialog>
-  <dialog id="conflict-dialog"><h2>其他设备更新了数据</h2><p>请选择保留哪一份书架和进度。使用本机版本将尝试覆盖最新云端版本；使用云端版本会舍弃本机未同步变更。</p><button id="keep-local">保留本机版本</button><button id="keep-cloud">使用云端版本</button></dialog>
+  <dialog id="conflict-dialog"><h2 id="conflict-title">其他设备更新了数据</h2><p id="conflict-message">请选择保留哪一份书架和进度。使用本机版本将尝试覆盖最新云端版本；使用云端版本会舍弃本机未同步变更。</p><button id="keep-local">保留本机版本</button><button id="keep-cloud">使用云端版本</button></dialog>
 </body>
 </html>
